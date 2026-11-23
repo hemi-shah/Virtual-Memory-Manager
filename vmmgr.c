@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -11,6 +10,12 @@ signed char physicalMemory[256][256];
 // define TLB with 16 entries
 int tlbPage[16];
 int tlbFrame[16];
+
+// keeps track of when each TLB entry was last used
+int tlbLastUsed[16];
+
+// finds the least recently used TLB entry
+int findLRU(int tlbLastUsed[]);
 
 int main(int argc, char *argv[]) {
 
@@ -44,6 +49,8 @@ int main(int argc, char *argv[]) {
     int tlbHits = 0;
     // keeps track of number of TLB misses
     int tlbMisses = 0;
+    // keeps track of the current address access
+    int accessCounter = 0;
 
     // stores page fault rate
     double pageFaultRate;
@@ -78,7 +85,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    // intialize all entries in page table to -1
+    // initialize all entries in page table to -1
     for (int i = 0; i < 256; i++) {
         pageTable[i] = -1;
     }
@@ -93,6 +100,8 @@ int main(int argc, char *argv[]) {
     while (fscanf(file, "%u", &logicalAddress) == 1) {
         // increment total number of addresses processed
         totalAddresses++;
+        // gives address an access timestamp
+        accessCounter++;
 
         // mask the logical address to the rightmost 16 bits
         logicalAddress = logicalAddress & 0xFFFF;
@@ -109,6 +118,7 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < 16; i++) {
             if (tlbPage[i] == pageNum) {
                 frameNum = tlbFrame[i];
+                tlbLastUsed[i] = accessCounter;
                 tlbHit = 1;
                 break;
             }
@@ -152,12 +162,27 @@ int main(int argc, char *argv[]) {
             }
 
             // add page number and frame number to TLB
+            int emptyIndex = -1;
+
             for (int i = 0; i < 16; i++) {
                 if (tlbPage[i] == -1) {
-                    tlbPage[i] = pageNum;
-                    tlbFrame[i] = frameNum;
+                    emptyIndex = i;
                     break;
                 }
+            }
+
+            // if there is an empty entry, use it
+            if (emptyIndex != -1) {
+                tlbPage[emptyIndex] = pageNum;
+                tlbFrame[emptyIndex] = frameNum;
+                tlbLastUsed[emptyIndex] = accessCounter;
+            } else {
+                // if TLB is full, replace least recently used entry
+                int replaceIndex = findLRU(tlbLastUsed);
+
+                tlbPage[replaceIndex] = pageNum;
+                tlbFrame[replaceIndex] = frameNum;
+                tlbLastUsed[replaceIndex] = accessCounter;
             }
         }
 
@@ -180,7 +205,7 @@ int main(int argc, char *argv[]) {
         tlbHitRate = 0.0;
     }
 
-    if (tlbMisses + tlbHits == totalAddresses){
+    if (tlbMisses + tlbHits == totalAddresses) {
         printf("TLB Misses + TLB Hits = total addresses\n");
     } else {
         printf("TLB Misses + TLB Hits != total addresses\n");
@@ -200,4 +225,17 @@ int main(int argc, char *argv[]) {
     fclose(backingStore);
 
     return 0;
+}
+
+// finds the least recently used TLB entry
+int findLRU(int tlbLastUsed[]) {
+    int replaceIndex = 0;
+
+    for (int i = 1; i < 16; i++) {
+        if (tlbLastUsed[i] < tlbLastUsed[replaceIndex]) {
+            replaceIndex = i;
+        }
+    }
+
+    return replaceIndex;
 }
