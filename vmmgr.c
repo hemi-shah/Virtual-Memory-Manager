@@ -7,6 +7,11 @@
 #define TLB_LRU 0
 #define TLB_RANDOM 1
 
+// page replacement policy options
+#define PAGE_FIFO 0
+#define PAGE_LRU 1
+#define PAGE_RANDOM 2
+
 // define page table with 256 entries
 int pageTable[256];
 
@@ -20,11 +25,32 @@ int tlbFrame[16];
 // keeps track of when each TLB entry was last used
 int tlbLastUsed[16];
 
+// stores the number of frames in physical memory (defaults to 256)
+int numFrames = 256;
+
+// keeps track of which page is stored in each frame
+int frameToPage[256];
+
+// keeps track of when each frame was last used
+int frameLastUsed[256];
+
+// keeps track of the next frame to replace for FIFO
+int fifoNext = 0;
+
 // finds the least recently used TLB entry
 int findLRU(int tlbLastUsed[]);
 
 // finds a random TLB entry
 int findRandom();
+
+// finds the oldest frame using FIFO
+int findFIFO();
+
+// finds the least recently used physical memory frame
+int findLRUFrame(int frameLastUsed[]);
+
+// finds a random physical memory frame
+int findRandomFrame();
 
 int main(int argc, char *argv[]) {
 
@@ -33,6 +59,12 @@ int main(int argc, char *argv[]) {
 
     // backing store pointer
     FILE *backingStore;
+
+    // csv file pointer
+    FILE *csvFile;
+
+    // stores the csv file name (defaults to results.csv)
+    char *csvName = "results.csv";
 
     // stores logical address
     unsigned int logicalAddress;
@@ -46,7 +78,7 @@ int main(int argc, char *argv[]) {
     // stores frame number
     int frameNum;
     // stores byte value
-    signed int byteValue;
+    int byteValue;
 
     // keeps track of next frame
     int nextFrame = 0;
@@ -69,26 +101,55 @@ int main(int argc, char *argv[]) {
     // stores the TLB replacement policy (defaults to LRU)
     int tlbPolicy = TLB_LRU;
 
+    // stores the page replacement policy (defaults to FIFO)
+    int pagePolicy = PAGE_FIFO;
+
     // stores the number of arguments entered
     int nargs = argc - 1;
 
     // check to see if input file is provided
-    if (nargs == 1 || nargs == 3) {
-        // if a TLB policy is provided then it is read
-        if (nargs == 3) {
-            // check for the -tlb flag
-            if (strcmp(argv[2], "-tlb") != 0) {
-                fprintf(stderr, "Unknown option: %s\n", argv[2]);
-                return 1;
-            }
+    if (nargs % 2 == 1 && nargs <= 9) {
+        // read each option provided after the input file
+        for (int i = 2; i < argc; i += 2) {
+            if (strcmp(argv[i], "-tlb") == 0) {
+                // set the TLB policy
+                if (strcmp(argv[i + 1], "lru") == 0) {
+                    tlbPolicy = TLB_LRU;
+                } else if (strcmp(argv[i + 1], "random") == 0) {
+                    tlbPolicy = TLB_RANDOM;
+                } else {
+                    fprintf(stderr, "Unknown TLB policy: %s\n", argv[i + 1]);
+                    return 1;
+                }
+            } else if (strcmp(argv[i], "-page") == 0) {
+                // set the page replacement policy
+                if (strcmp(argv[i + 1], "fifo") == 0) {
+                    pagePolicy = PAGE_FIFO;
+                } else if (strcmp(argv[i + 1], "lru") == 0) {
+                    pagePolicy = PAGE_LRU;
+                } else if (strcmp(argv[i + 1], "random") == 0) {
+                    pagePolicy = PAGE_RANDOM;
+                } else {
+                    fprintf(stderr, "Unknown page policy: %s\n", argv[i + 1]);
+                    return 1;
+                }
+            } else if (strcmp(argv[i], "-csv") == 0) {
+                // set the csv file name
+                csvName = argv[i + 1];
+            } else if (strcmp(argv[i], "-frames") == 0) {
+                // set the number of frames
+                char *end;
+                long frames = strtol(argv[i + 1], &end, 10);
 
-            // set the TLB policy
-            if (strcmp(argv[3], "lru") == 0) {
-                tlbPolicy = TLB_LRU;
-            } else if (strcmp(argv[3], "random") == 0) {
-                tlbPolicy = TLB_RANDOM;
+                // number of frames must be a number from 1 to 256
+                if (*end != '\0' || frames < 1 || frames > 256) {
+                    fprintf(stderr, "Invalid number of frames: %s (must be 1-256)\n", argv[i + 1]);
+                    return 1;
+                }
+
+                numFrames = frames;
             } else {
-                fprintf(stderr, "Unknown TLB policy: %s\n", argv[3]);
+                fprintf(stderr, "Unknown option: %s\n", argv[i]);
                 return 1;
             }
         }
@@ -102,7 +163,7 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     } else {
-        fprintf(stderr, "Please provide an input filename.\n");
+        fprintf(stderr, "Usage: %s <input file> [-tlb lru|random] [-page fifo|lru|random] [-frames N] [-csv file]\n", argv[0]);
         return 1;
     }
 
@@ -115,6 +176,20 @@ int main(int argc, char *argv[]) {
         fclose(file);
         return 1;
     }
+
+    // open csv file in write mode
+    csvFile = fopen(csvName, "w");
+
+    // check if csv file could be created
+    if (csvFile == NULL) {
+        fprintf(stderr, "Could not create csv file.\n");
+        fclose(file);
+        fclose(backingStore);
+        return 1;
+    }
+
+    // write csv header
+    fprintf(csvFile, "logical_address,page_number,offset,tlb,page_fault,frame_number,physical_address,value,replaced_page,replaced_frame\n");
 
     // seed the random number generator for the random TLB policy
     srand(time(NULL));
@@ -149,6 +224,12 @@ int main(int argc, char *argv[]) {
         // search TLB for page number
         int tlbHit = 0;
 
+        // keeps track of whether this address caused a page fault
+        int pageFault = 0;
+
+        // keeps track of the page replaced by this address (-1 if none)
+        int replacedPage = -1;
+
         for (int i = 0; i < 16; i++) {
             if (tlbPage[i] == pageNum) {
                 frameNum = tlbFrame[i];
@@ -171,13 +252,39 @@ int main(int argc, char *argv[]) {
                 frameNum = pageTable[pageNum];
             } else {
                 // load page into physical memory when page fault occurs
-                frameNum = nextFrame;
+                if (nextFrame < numFrames) {
+                    // use the next free frame
+                    frameNum = nextFrame;
+                    nextFrame++;
+                } else {
+                    // if memory is full, replace a frame based on the page policy
+                    if (pagePolicy == PAGE_FIFO) {
+                        frameNum = findFIFO();
+                    } else if (pagePolicy == PAGE_LRU) {
+                        frameNum = findLRUFrame(frameLastUsed);
+                    } else {
+                        frameNum = findRandomFrame();
+                    }
+
+                    // remove the replaced page from the page table
+                    replacedPage = frameToPage[frameNum];
+                    pageTable[replacedPage] = -1;
+
+                    // remove the replaced page from the TLB
+                    for (int i = 0; i < 16; i++) {
+                        if (tlbPage[i] == replacedPage) {
+                            tlbPage[i] = -1;
+                            tlbFrame[i] = -1;
+                        }
+                    }
+                }
 
                 // locate page number
                 if (fseek(backingStore, pageNum * 256, SEEK_SET) != 0) {
                     fprintf(stderr, "Error locating page in backing store.\n");
                     fclose(file);
                     fclose(backingStore);
+                    fclose(csvFile);
                     return 1;
                 }
 
@@ -186,13 +293,15 @@ int main(int argc, char *argv[]) {
                     fprintf(stderr, "Error reading page from backing store.\n");
                     fclose(file);
                     fclose(backingStore);
+                    fclose(csvFile);
                     return 1;
                 }
 
                 // update page number in page table
                 pageTable[pageNum] = frameNum;
-                nextFrame++;
+                frameToPage[frameNum] = pageNum;
                 pageFaults++;
+                pageFault = 1;
             }
 
             // add page number and frame number to TLB
@@ -234,6 +343,19 @@ int main(int argc, char *argv[]) {
         // retrieve byte value
         byteValue = physicalMemory[frameNum][offset];
 
+        // update the last used timestamp for this frame
+        frameLastUsed[frameNum] = accessCounter;
+
+        // write address translation to csv file
+        fprintf(csvFile, "%u,%d,%d,%s,%s,%d,%u,%d,", logicalAddress, pageNum, offset, tlbHit == 1 ? "hit" : "miss", pageFault == 1 ? "yes" : "no", frameNum, physicalAddress, byteValue);
+
+        // if a page was replaced, record the replaced page and frame
+        if (replacedPage != -1) {
+            fprintf(csvFile, "%d,%d\n", replacedPage, frameNum);
+        } else {
+            fprintf(csvFile, ",\n");
+        }
+
         // print address translation
         printf("Logical Address: %u Physical Address: %u Value: %d\n", logicalAddress, physicalAddress, byteValue);
     }
@@ -247,12 +369,14 @@ int main(int argc, char *argv[]) {
         tlbHitRate = 0.0;
     }
 
-    if (tlbMisses + tlbHits == totalAddresses) {
-        printf("TLB Misses + TLB Hits = total addresses\n");
-    } else {
-        printf("TLB Misses + TLB Hits != total addresses\n");
-    }
+    // debug messages
+    // if (tlbMisses + tlbHits == totalAddresses) {
+    //     printf("TLB Misses + TLB Hits = total addresses\n");
+    // } else {
+    //     printf("TLB Misses + TLB Hits != total addresses\n");
+    // }
 
+    // print stats
     printf("Page Faults: %d\n", pageFaults);
     printf("Total Addresses: %d\n", totalAddresses);
     printf("Page Fault Rate: %.3f\n", pageFaultRate);
@@ -265,6 +389,9 @@ int main(int argc, char *argv[]) {
 
     // close backing store file
     fclose(backingStore);
+
+    // close csv file
+    fclose(csvFile);
 
     return 0;
 }
@@ -286,4 +413,34 @@ int findLRU(int tlbLastUsed[]) {
 int findRandom() {
     // pick a random index between 0 and 15
     return rand() % 16;
+}
+
+// finds the oldest frame using FIFO
+int findFIFO() {
+    // the oldest frame is the next one in line
+    int replaceFrame = fifoNext;
+
+    // move to the next oldest frame, wrapping around
+    fifoNext = (fifoNext + 1) % numFrames;
+
+    return replaceFrame;
+}
+
+// finds the least recently used physical memory frame
+int findLRUFrame(int frameLastUsed[]) {
+    int replaceFrame = 0;
+
+    for (int i = 1; i < numFrames; i++) {
+        if (frameLastUsed[i] < frameLastUsed[replaceFrame]) {
+            replaceFrame = i;
+        }
+    }
+
+    return replaceFrame;
+}
+
+// finds a random physical memory frame
+int findRandomFrame() {
+    // pick a random frame between 0 and numFrames - 1
+    return rand() % numFrames;
 }
