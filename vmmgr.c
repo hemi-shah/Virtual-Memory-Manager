@@ -1,5 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+// TLB replacement policy options
+#define TLB_LRU 0
+#define TLB_RANDOM 1
 
 // define page table with 256 entries
 int pageTable[256];
@@ -16,6 +22,9 @@ int tlbLastUsed[16];
 
 // finds the least recently used TLB entry
 int findLRU(int tlbLastUsed[]);
+
+// finds a random TLB entry
+int findRandom();
 
 int main(int argc, char *argv[]) {
 
@@ -57,11 +66,33 @@ int main(int argc, char *argv[]) {
     // stores TLB hit rate
     double tlbHitRate;
 
+    // stores the TLB replacement policy (defaults to LRU)
+    int tlbPolicy = TLB_LRU;
+
     // stores the number of arguments entered
     int nargs = argc - 1;
 
     // check to see if input file is provided
-    if (nargs == 1) {
+    if (nargs == 1 || nargs == 3) {
+        // if a TLB policy is provided then it is read
+        if (nargs == 3) {
+            // check for the -tlb flag
+            if (strcmp(argv[2], "-tlb") != 0) {
+                fprintf(stderr, "Unknown option: %s\n", argv[2]);
+                return 1;
+            }
+
+            // set the TLB policy
+            if (strcmp(argv[3], "lru") == 0) {
+                tlbPolicy = TLB_LRU;
+            } else if (strcmp(argv[3], "random") == 0) {
+                tlbPolicy = TLB_RANDOM;
+            } else {
+                fprintf(stderr, "Unknown TLB policy: %s\n", argv[3]);
+                return 1;
+            }
+        }
+
         // if file is provided then it is read
         file = fopen(argv[1], "r");
 
@@ -84,6 +115,9 @@ int main(int argc, char *argv[]) {
         fclose(file);
         return 1;
     }
+
+    // seed the random number generator for the random TLB policy
+    srand(time(NULL));
 
     // initialize all entries in page table to -1
     for (int i = 0; i < 256; i++) {
@@ -177,8 +211,16 @@ int main(int argc, char *argv[]) {
                 tlbFrame[emptyIndex] = frameNum;
                 tlbLastUsed[emptyIndex] = accessCounter;
             } else {
-                // if TLB is full, replace least recently used entry
-                int replaceIndex = findLRU(tlbLastUsed);
+                // if TLB is full, replace an entry based on the TLB policy
+                int replaceIndex;
+
+                if (tlbPolicy == TLB_LRU) {
+                    // replace least recently used entry
+                    replaceIndex = findLRU(tlbLastUsed);
+                } else {
+                    // replace random entry
+                    replaceIndex = findRandom();
+                }
 
                 tlbPage[replaceIndex] = pageNum;
                 tlbFrame[replaceIndex] = frameNum;
@@ -238,4 +280,10 @@ int findLRU(int tlbLastUsed[]) {
     }
 
     return replaceIndex;
+}
+
+// finds a random TLB entry
+int findRandom() {
+    // pick a random index between 0 and 15
+    return rand() % 16;
 }
